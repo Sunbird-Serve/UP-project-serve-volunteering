@@ -85,6 +85,7 @@ public class RcService {
                 .block();
     }
 
+
     /*public ResponseEntity<List<User>> getAllusers(List<User> allUsers) {
         return rcClient.post()
                 .uri("/Users/search")
