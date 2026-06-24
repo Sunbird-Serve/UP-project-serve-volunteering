@@ -23,6 +23,10 @@ import java.util.List;
 import java.util.Optional;
 import java.util.stream.Collectors;
 import org.springframework.http.HttpStatus;
+import org.springframework.security.core.Authentication;
+import org.springframework.security.core.context.SecurityContextHolder;
+import org.springframework.security.oauth2.jwt.Jwt;
+import org.springframework.security.oauth2.server.resource.authentication.JwtAuthenticationToken;
 import org.springframework.web.reactive.function.client.WebClientResponseException;
 
 
@@ -33,11 +37,13 @@ public class UserManagementService {
 
     private final RcService rcService;
     private final UserCacheService userCacheService;
+    private final KeycloakAdminService keycloakAdminService;
 
      @Autowired
-    public UserManagementService(RcService rcService, UserCacheService userCacheService) {
+    public UserManagementService(RcService rcService, UserCacheService userCacheService, KeycloakAdminService keycloakAdminService) {
         this.rcService = rcService;
         this.userCacheService = userCacheService;
+        this.keycloakAdminService = keycloakAdminService;
     }
 
     @Autowired
@@ -167,7 +173,14 @@ public class UserManagementService {
             log.info("Successfully created user with status: {}", response.getStatusCode());
             // Refresh cache so the new user is immediately searchable
             userCacheService.invalidate();
-            return response;
+
+            // Assign Keycloak realm roles after successful user creation
+            assignKeycloakRoles(userRequest.getRole());
+
+            // Set agencyId/agencyType as Keycloak user attributes (mapped to JWT claims)
+            setKeycloakUserAttributes(userRequest.getAgencyId(), null);
+
+            return ResponseEntity.status(response.getStatusCode()).body(response.getBody());
         } catch (WebClientResponseException e) {
             log.error("Error creating user: {}", e.getMessage());
             return ResponseEntity.status(e.getStatusCode()).build();
@@ -183,7 +196,7 @@ public class UserManagementService {
             log.info("Updating user with ID: {}", userId);
             ResponseEntity<RcUserResponse> response = rcService.updateUser(userRequest, userId);
             log.info("Successfully updated user with status: {}", response.getStatusCode());
-            return response;
+            return ResponseEntity.status(response.getStatusCode()).body(response.getBody());
         } catch (WebClientResponseException e) {
             log.error("Error updating user {}: {}", userId, e.getMessage());
             return ResponseEntity.status(e.getStatusCode()).build();
@@ -198,7 +211,7 @@ public class UserManagementService {
             log.info("Creating user profile for user ID: {}", userProfileRequest.getUserId());
             ResponseEntity<RcUserProfileResponse> response = rcService.createUserProfile(userProfileRequest);
             log.info("Successfully created user profile with status: {}", response.getStatusCode());
-            return response;
+            return ResponseEntity.status(response.getStatusCode()).body(response.getBody());
         } catch (WebClientResponseException e) {
             log.error("Error creating user profile: {}", e.getMessage());
             return ResponseEntity.status(e.getStatusCode()).build();
@@ -213,7 +226,7 @@ public class UserManagementService {
             log.info("Updating user profile with ID: {}", userProfileId);
             ResponseEntity<RcUserProfileResponse> response = rcService.updateUserProfile(userProfileRequest, userProfileId);
             log.info("Successfully updated user profile with status: {}", response.getStatusCode());
-            return response;
+            return ResponseEntity.status(response.getStatusCode()).body(response.getBody());
         } catch (WebClientResponseException e) {
             log.error("Error updating user profile {}: {}", userProfileId, e.getMessage());
             return ResponseEntity.status(e.getStatusCode()).build();
@@ -297,7 +310,7 @@ public class UserManagementService {
             log.info("Updating user status for user ID: {} to status: {}", userId, userStatusRequest.getStatus());
             ResponseEntity<User> response = rcService.updateUserStatus(userId, userStatusRequest);
             log.info("Successfully updated user status with status: {}", response.getStatusCode());
-            return response;
+            return ResponseEntity.status(response.getStatusCode()).body(response.getBody());
         } catch (WebClientResponseException e) {
             log.error("Error updating user status for user {}: {}", userId, e.getMessage());
             return ResponseEntity.status(e.getStatusCode()).build();
@@ -312,13 +325,74 @@ public class UserManagementService {
             log.info("Updating user agency for user ID: {} to agency: {}", userId, agencyUpdateRequest.getAgencyId());
             ResponseEntity<User> response = rcService.updateUserAgency(userId, agencyUpdateRequest);
             log.info("Successfully updated user agency with status: {}", response.getStatusCode());
-            return response;
+            return ResponseEntity.status(response.getStatusCode()).body(response.getBody());
         } catch (WebClientResponseException e) {
             log.error("Error updating user agency for user {}: {}", userId, e.getMessage());
             return ResponseEntity.status(e.getStatusCode()).build();
         } catch (Exception e) {
             log.error("Unexpected error updating user agency for user {}: {}", userId, e.getMessage(), e);
             return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR).build();
+        }
+    }
+
+    /**
+     * Extracts the Keycloak user ID (sub claim) from the current security context
+     * and assigns the specified roles via the Keycloak Admin API.
+     * Failures are logged but never propagated — user creation should not fail due to role assignment.
+     */
+    private void assignKeycloakRoles(List<String> roles) {
+        if (roles == null || roles.isEmpty()) {
+            return;
+        }
+
+        try {
+            Authentication authentication = SecurityContextHolder.getContext().getAuthentication();
+            if (!(authentication instanceof JwtAuthenticationToken jwtAuth)) {
+                log.warn("Cannot assign Keycloak roles: authentication is not JWT-based");
+                return;
+            }
+
+            Jwt jwt = jwtAuth.getToken();
+            String keycloakUserId = jwt.getSubject();
+
+            if (keycloakUserId == null || keycloakUserId.isBlank()) {
+                log.warn("Cannot assign Keycloak roles: JWT has no subject claim");
+                return;
+            }
+
+            log.info("Assigning Keycloak roles {} to user '{}'", roles, keycloakUserId);
+            for (String role : roles) {
+                keycloakAdminService.assignRealmRole(keycloakUserId, role);
+            }
+        } catch (Exception e) {
+            log.warn("Failed to assign Keycloak roles: {}", e.getMessage());
+        }
+    }
+
+    /**
+     * Sets agencyId and agencyType as Keycloak user attributes on the current user.
+     * These attributes are mapped to JWT claims via protocol mappers.
+     * Failures are logged but never propagated.
+     */
+    private void setKeycloakUserAttributes(String agencyId, String agencyType) {
+        try {
+            Authentication authentication = SecurityContextHolder.getContext().getAuthentication();
+            if (!(authentication instanceof JwtAuthenticationToken jwtAuth)) {
+                log.warn("Cannot set Keycloak attributes: authentication is not JWT-based");
+                return;
+            }
+
+            Jwt jwt = jwtAuth.getToken();
+            String keycloakUserId = jwt.getSubject();
+
+            if (keycloakUserId == null || keycloakUserId.isBlank()) {
+                log.warn("Cannot set Keycloak attributes: JWT has no subject claim");
+                return;
+            }
+
+            keycloakAdminService.setUserAttributes(keycloakUserId, agencyId, agencyType);
+        } catch (Exception e) {
+            log.warn("Failed to set Keycloak user attributes: {}", e.getMessage());
         }
     }
 }
