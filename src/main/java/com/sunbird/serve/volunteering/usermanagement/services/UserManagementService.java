@@ -17,6 +17,7 @@ import jakarta.mail.MessagingException;
 import jakarta.mail.internet.MimeMessage;
 import org.springframework.http.ResponseEntity;
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.mail.javamail.JavaMailSender;
 import org.springframework.mail.javamail.MimeMessageHelper;
 import org.springframework.stereotype.Service;
@@ -108,6 +109,12 @@ public class UserManagementService {
 
     @Autowired
     private JavaMailSender javaMailSender;
+
+    @Value("${mail.from}")
+    private String mailFrom;
+
+    @Value("${mail.from-name}")
+    private String mailFromName;
 
     public ResponseEntity<User> getUserById(String userId, Map<String, String> headers) {
         try {
@@ -531,6 +538,7 @@ public class UserManagementService {
             log.info("Sending welcome email to: {} for volunteer: {}", email, volunteerName);
             MimeMessage mimeMessage = javaMailSender.createMimeMessage();
             MimeMessageHelper mimeMessageHelper = new MimeMessageHelper(mimeMessage, true, "utf-8");
+            mimeMessageHelper.setFrom(mailFrom, mailFromName);
             mimeMessageHelper.setTo(email);
             mimeMessageHelper.setSubject("Welcome Aboard SERVE's Volunteer Squad!");
             mimeMessageHelper.setText("Dear " + volunteerName +",<br>"+
