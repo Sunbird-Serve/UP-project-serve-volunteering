@@ -1,6 +1,9 @@
 package com.sunbird.serve.volunteering.usermanagement.services;
 
+import com.sunbird.serve.volunteering.config.ConflictException;
+import com.sunbird.serve.volunteering.config.ServiceUnavailableException;
 import com.sunbird.serve.volunteering.models.request.UserProfileRequest.UserProfileRequest;
+import com.sunbird.serve.volunteering.usermanagement.repositories.VolunteerManagementRepository;
 
 import com.sunbird.serve.volunteering.models.request.UserRequest;
 import com.sunbird.serve.volunteering.models.response.RcUserResponse;
@@ -39,12 +42,68 @@ public class UserManagementService {
     private final RcService rcService;
     private final UserCacheService userCacheService;
     private final KeycloakAdminService keycloakAdminService;
+    private final VolunteerManagementRepository volunteerManagementRepository;
+
+    // Serialises create/update calls for the same email (or the same user for profiles) within this instance
+    private static final int LOCK_STRIPES = 64;
+    private final Object[] keyLocks = new Object[LOCK_STRIPES];
 
      @Autowired
-    public UserManagementService(RcService rcService, UserCacheService userCacheService, KeycloakAdminService keycloakAdminService) {
+    public UserManagementService(RcService rcService, UserCacheService userCacheService, KeycloakAdminService keycloakAdminService,
+                                 VolunteerManagementRepository volunteerManagementRepository) {
         this.rcService = rcService;
         this.userCacheService = userCacheService;
         this.keycloakAdminService = keycloakAdminService;
+        this.volunteerManagementRepository = volunteerManagementRepository;
+        for (int i = 0; i < LOCK_STRIPES; i++) {
+            keyLocks[i] = new Object();
+        }
+    }
+
+    private Object lockFor(String key) {
+        return keyLocks[(key.hashCode() & 0x7fffffff) % LOCK_STRIPES];
+    }
+
+    /**
+     * Trims and lowercases the request email in place and returns it, or null if there is none.
+     * Emails are the unique key for users, so they are stored in this one form.
+     */
+    private String normalizeRequestEmail(UserRequest userRequest) {
+        if (userRequest.getContactDetails() == null || userRequest.getContactDetails().getEmail() == null) {
+            return null;
+        }
+        String email = userRequest.getContactDetails().getEmail().trim().toLowerCase();
+        if (email.isEmpty()) {
+            return null;
+        }
+        userRequest.getContactDetails().setEmail(email);
+        return email;
+    }
+
+    /** Duplicate checks read the user cache, so it must have loaded at least once. */
+    private void ensureCacheLoaded() {
+        if (!userCacheService.isLoaded()) {
+            userCacheService.refreshCache();
+            if (!userCacheService.isLoaded()) {
+                throw new ServiceUnavailableException("The user directory is not ready yet. Please retry in a few seconds.");
+            }
+        }
+    }
+
+    /**
+     * Throws ConflictException if another user already has this email.
+     * exceptUserId is the user being updated (their own email is not a conflict); null when creating.
+     */
+    private void assertEmailAvailable(String email, String exceptUserId) {
+        Optional<User> existing = userCacheService.getUserByEmail(email);
+        if (existing.isPresent()) {
+            if (exceptUserId == null || !exceptUserId.equals(existing.get().getOsid())) {
+                throw new ConflictException("A user with email '" + email + "' already exists");
+            }
+        } else if (userCacheService.emailExists(email)) {
+            // created moments ago and not in the cache snapshot yet
+            throw new ConflictException("A user with email '" + email + "' already exists");
+        }
     }
 
     @Autowired
@@ -167,12 +226,25 @@ public class UserManagementService {
 
    
     public ResponseEntity<RcUserResponse> createUser(UserRequest userRequest, Map<String, String> headers) {
+        String email = normalizeRequestEmail(userRequest);
+        if (email == null) {
+            return doCreateUser(userRequest, null);
+        }
+        ensureCacheLoaded();
+        synchronized (lockFor(email)) {
+            assertEmailAvailable(email, null);
+            return doCreateUser(userRequest, email);
+        }
+    }
+
+    private ResponseEntity<RcUserResponse> doCreateUser(UserRequest userRequest, String email) {
         try {
             log.info("Creating new user with email: {}", 
                 userRequest.getContactDetails() != null ? userRequest.getContactDetails().getEmail() : "N/A");
             ResponseEntity<RcUserResponse> response = rcService.createUser(userRequest);
             log.info("Successfully created user with status: {}", response.getStatusCode());
-            // Refresh cache so the new user is immediately searchable
+            // Remember the email right away so a second request for it is rejected, then refresh the cache
+            userCacheService.registerEmail(email);
             userCacheService.invalidate();
 
             // Assign Keycloak realm roles after successful user creation
@@ -198,6 +270,18 @@ public class UserManagementService {
      * If RC registration fails, the Keycloak user is deleted as a rollback.
      */
     public ResponseEntity<RcUserResponse> onboardUser(UserRequest userRequest, Map<String, String> headers) {
+        String normalizedEmail = normalizeRequestEmail(userRequest);
+        if (normalizedEmail == null) {
+            return doOnboardUser(userRequest, headers);
+        }
+        ensureCacheLoaded();
+        synchronized (lockFor(normalizedEmail)) {
+            assertEmailAvailable(normalizedEmail, null);
+            return doOnboardUser(userRequest, headers);
+        }
+    }
+
+    private ResponseEntity<RcUserResponse> doOnboardUser(UserRequest userRequest, Map<String, String> headers) {
         String email = userRequest.getContactDetails() != null ? userRequest.getContactDetails().getEmail() : null;
         String mobile = userRequest.getContactDetails() != null ? userRequest.getContactDetails().getMobile() : null;
         String fullname = userRequest.getIdentityDetails() != null ? userRequest.getIdentityDetails().getFullname() : null;
@@ -250,6 +334,7 @@ public class UserManagementService {
         try {
             ResponseEntity<RcUserResponse> rcResponse = rcService.createUser(userRequest);
             log.info("Successfully onboarded user '{}' with RC status: {}", email, rcResponse.getStatusCode());
+            userCacheService.registerEmail(email);
             userCacheService.invalidate();
             return ResponseEntity.status(rcResponse.getStatusCode()).body(rcResponse.getBody());
         } catch (WebClientResponseException e) {
@@ -267,10 +352,27 @@ public class UserManagementService {
 
 
     public ResponseEntity<RcUserResponse> updateUser(String userId, UserRequest userRequest, Map<String, String> headers) {
+        String email = normalizeRequestEmail(userRequest);
+        if (email == null) {
+            return doUpdateUser(userId, userRequest, null);
+        }
+        ensureCacheLoaded();
+        synchronized (lockFor(email)) {
+            assertEmailAvailable(email, userId);
+            return doUpdateUser(userId, userRequest, email);
+        }
+    }
+
+    private ResponseEntity<RcUserResponse> doUpdateUser(String userId, UserRequest userRequest, String email) {
         try {
             log.info("Updating user with ID: {}", userId);
             ResponseEntity<RcUserResponse> response = rcService.updateUser(userRequest, userId);
             log.info("Successfully updated user with status: {}", response.getStatusCode());
+            if (email != null) {
+                // the email may have changed, so keep it reserved and refresh the cache
+                userCacheService.registerEmail(email);
+                userCacheService.invalidate();
+            }
             return ResponseEntity.status(response.getStatusCode()).body(response.getBody());
         } catch (WebClientResponseException e) {
             log.error("Error updating user {}: {}", userId, e.getMessage());
@@ -282,6 +384,22 @@ public class UserManagementService {
     }
 
     public ResponseEntity<RcUserProfileResponse> createUserProfile(UserProfileRequest userProfileRequest, Map<String, String> headers) {
+        String userId = userProfileRequest.getUserId();
+        if (userId == null || userId.isBlank()) {
+            return doCreateUserProfile(userProfileRequest);
+        }
+        synchronized (lockFor(userId)) {
+            List<UserProfile> existing = rcService.getUserProfiles(userId);
+            boolean hasProfile = existing != null && existing.stream()
+                    .anyMatch(p -> userId.equals(p.getUserId()));
+            if (hasProfile) {
+                throw new ConflictException("A profile already exists for user '" + userId + "'");
+            }
+            return doCreateUserProfile(userProfileRequest);
+        }
+    }
+
+    private ResponseEntity<RcUserProfileResponse> doCreateUserProfile(UserProfileRequest userProfileRequest) {
         try {
             log.info("Creating user profile for user ID: {}", userProfileRequest.getUserId());
             ResponseEntity<RcUserProfileResponse> response = rcService.createUserProfile(userProfileRequest);
@@ -346,6 +464,65 @@ public class UserManagementService {
         } catch (Exception e) {
             log.error("Error fetching user profile by user ID {}: {}", userId, e.getMessage(), e);
             return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR).build();
+        }
+    }
+
+    /**
+     * Deletes a user and the user's profiles from the registry.
+     * Refused with 409 if the user has volunteering hours, because deleting would leave those rows
+     * pointing at nobody. Set such users to Inactive instead.
+     * Needs, nominations and fulfillments belong to other services and are not checked here.
+     * The user's Keycloak account is not touched.
+     */
+    public ResponseEntity<Void> deleteUser(String userId, Map<String, String> headers) {
+        try {
+            log.info("Deleting user: {}", userId);
+            User user = rcService.getUserById(userId);
+            if (user == null) {
+                return ResponseEntity.notFound().build();
+            }
+            if (volunteerManagementRepository.existsByUserId(userId)) {
+                throw new ConflictException("User '" + userId + "' has volunteering hours and cannot be deleted. Set the user to Inactive instead.");
+            }
+
+            List<UserProfile> profiles = rcService.getUserProfiles(userId);
+            if (profiles != null) {
+                for (UserProfile profile : profiles) {
+                    if (userId.equals(profile.getUserId()) && profile.getOsid() != null) {
+                        rcService.deleteUserProfile(profile.getOsid());
+                        log.info("Deleted profile {} of user {}", profile.getOsid(), userId);
+                    }
+                }
+            }
+
+            rcService.deleteUser(userId);
+            String email = user.getContactDetails() != null ? user.getContactDetails().getEmail() : null;
+            userCacheService.evict(userId, email);
+            userCacheService.invalidate();
+            log.info("Deleted user: {}", userId);
+            return ResponseEntity.noContent().build();
+        } catch (WebClientResponseException e) {
+            log.error("Error deleting user {}: {}", userId, e.getMessage());
+            return ResponseEntity.status(e.getStatusCode()).build();
+        }
+    }
+
+    /**
+     * Deletes a single user profile from the registry.
+     */
+    public ResponseEntity<Void> deleteUserProfile(String userProfileId, Map<String, String> headers) {
+        try {
+            log.info("Deleting user profile: {}", userProfileId);
+            UserProfile profile = rcService.getUserProfileById(userProfileId);
+            if (profile == null) {
+                return ResponseEntity.notFound().build();
+            }
+            rcService.deleteUserProfile(userProfileId);
+            log.info("Deleted user profile: {}", userProfileId);
+            return ResponseEntity.noContent().build();
+        } catch (WebClientResponseException e) {
+            log.error("Error deleting user profile {}: {}", userProfileId, e.getMessage());
+            return ResponseEntity.status(e.getStatusCode()).build();
         }
     }
 

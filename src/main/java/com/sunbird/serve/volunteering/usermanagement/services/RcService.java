@@ -269,6 +269,28 @@ public ResponseEntity<VolunteeringHours> updateVolunteerHours(VolunteeringHoursR
                 .block();
     }
 
+    public void deleteUser(String userId) {
+        rcClient.delete()
+                .uri((uriBuilder -> uriBuilder
+                        .path("/Users/{id}")
+                        .build(userId)
+                ))
+                .retrieve()
+                .toBodilessEntity()
+                .block();
+    }
+
+    public void deleteUserProfile(String userProfileId) {
+        rcClient.delete()
+                .uri((uriBuilder -> uriBuilder
+                        .path("/UserProfile/{id}")
+                        .build(userProfileId)
+                ))
+                .retrieve()
+                .toBodilessEntity()
+                .block();
+    }
+
     public ResponseEntity<User> updateUserAgency(String userId, AgencyUpdateRequest agencyUpdateRequest) {
         return rcClient.put()
                 .uri((uriBuilder -> uriBuilder

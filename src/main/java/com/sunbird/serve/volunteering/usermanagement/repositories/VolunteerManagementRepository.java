@@ -15,4 +15,8 @@ public interface VolunteerManagementRepository extends JpaRepository<Volunteerin
 
     Optional<VolunteeringHours> findByUserIdAndNeedDeliverableId(String userId, String needDeliverableId);
 
+    boolean existsByUserIdAndNeedDeliverableId(String userId, String needDeliverableId);
+
+    boolean existsByUserId(String userId);
+
 }

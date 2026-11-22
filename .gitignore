@@ -45,3 +45,6 @@ out/
 .env.test
 .env.production
 *.env
+
+# Cleanup script output (contains personal data)
+scripts/cleanup/out/

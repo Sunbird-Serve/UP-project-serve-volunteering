@@ -1,7 +1,9 @@
 package com.sunbird.serve.volunteering.usermanagement.services;
 
+import com.sunbird.serve.volunteering.config.ConflictException;
 import com.sunbird.serve.volunteering.models.VolunteerHours.VolunteeringHours;
 import com.sunbird.serve.volunteering.usermanagement.repositories.VolunteerManagementRepository;
+import org.springframework.dao.DataIntegrityViolationException;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -73,9 +75,24 @@ public class VolunteerManagementService {
 
 
     public ResponseEntity<VolunteeringHours> createVolunteerHours(VolunteeringHours volunteeringHours, Map<String, String> headers) {
+        // Never trust a client-supplied id: with an id, save() would overwrite an existing row
+        volunteeringHours.setId(null);
+
+        String userId = volunteeringHours.getUserId();
+        String needDeliverableId = volunteeringHours.getNeedDeliverableId();
+        if (userId != null && needDeliverableId != null
+                && volunteerManagementRepository.existsByUserIdAndNeedDeliverableId(userId, needDeliverableId)) {
+            throw new ConflictException("Volunteering hours already exist for user '" + userId
+                    + "' and deliverable '" + needDeliverableId + "'. Use the update endpoint instead.");
+        }
+
         try {
             VolunteeringHours saveVolunteeringHours = volunteerManagementRepository.save(volunteeringHours);
             return ResponseEntity.status(HttpStatus.CREATED).body(saveVolunteeringHours);
+        } catch (DataIntegrityViolationException e) {
+            // two requests raced and the database unique index (if present) rejected the second
+            throw new ConflictException("Volunteering hours already exist for user '" + userId
+                    + "' and deliverable '" + needDeliverableId + "'. Use the update endpoint instead.");
         } catch (Exception e) {
             logger.error("Error creating volunteer hours: {}", e.getMessage());
             return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR).build();

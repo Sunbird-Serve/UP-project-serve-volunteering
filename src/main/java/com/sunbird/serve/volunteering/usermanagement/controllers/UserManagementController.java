@@ -194,6 +194,31 @@ public class UserManagementController {
         return userManagementService.getUserProfileByUserId(userId, headers);
     }
 
+    @Operation(summary = "Delete user", description = "Deletes a user and the user's profiles. Refused with 409 if the user has volunteering hours; set such users to Inactive instead.")
+    @ApiResponses(value = {
+            @ApiResponse(responseCode = "204", description = "User deleted"),
+            @ApiResponse(responseCode = "404", description = "User not found"),
+            @ApiResponse(responseCode = "409", description = "User has volunteering hours")})
+    @DeleteMapping("/{userId}")
+    @PreAuthorize("hasAnyRole('sAdmin', 'nAdmin')")
+    public ResponseEntity<Void> deleteUser(
+            @PathVariable String userId,
+            @Parameter() @RequestHeader Map<String, String> headers) {
+        return userManagementService.deleteUser(userId, headers);
+    }
+
+    @Operation(summary = "Delete user profile", description = "Deletes a single user profile")
+    @ApiResponses(value = {
+            @ApiResponse(responseCode = "204", description = "User profile deleted"),
+            @ApiResponse(responseCode = "404", description = "User profile not found")})
+    @DeleteMapping("/user-profile/{userProfileId}")
+    @PreAuthorize("hasAnyRole('sAdmin', 'nAdmin')")
+    public ResponseEntity<Void> deleteUserProfile(
+            @PathVariable String userProfileId,
+            @Parameter() @RequestHeader Map<String, String> headers) {
+        return userManagementService.deleteUserProfile(userProfileId, headers);
+    }
+
     @Operation(summary = "Update User Status", description = "Update User Status")
     @ApiResponses(value = {
             @ApiResponse(responseCode = "201", description = "Successfully updated user status", content = @Content(mediaType = MediaType.APPLICATION_JSON_VALUE)),

@@ -107,6 +107,7 @@ class UserManagementServiceTest {
         // Given
         UserRequest userRequest = createValidUserRequest();
         RcUserResponse expectedResponse = new RcUserResponse();
+        when(userCacheService.isLoaded()).thenReturn(true);
         when(rcService.createUser(userRequest)).thenReturn(ResponseEntity.status(HttpStatus.CREATED).body(expectedResponse));
         doNothing().when(userCacheService).invalidate();
 
@@ -127,6 +128,7 @@ class UserManagementServiceTest {
         String userId = "test-user-id";
         UserRequest userRequest = createValidUserRequest();
         RcUserResponse expectedResponse = new RcUserResponse();
+        when(userCacheService.isLoaded()).thenReturn(true);
         when(rcService.updateUser(userRequest, userId)).thenReturn(ResponseEntity.ok(expectedResponse));
 
         // When
