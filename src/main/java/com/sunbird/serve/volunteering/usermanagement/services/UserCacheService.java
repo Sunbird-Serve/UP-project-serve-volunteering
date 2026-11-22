@@ -13,6 +13,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.stream.Collectors;
 
 /**
@@ -25,7 +26,11 @@ import java.util.stream.Collectors;
 @Slf4j
 public class UserCacheService {
 
-    private final RcService rcService;
+    private final RcWindowedFetcher rcWindowedFetcher;
+
+    // Only one refresh runs at a time; a request made during a refresh triggers one more run afterwards
+    private final AtomicBoolean refreshing = new AtomicBoolean(false);
+    private final AtomicBoolean rerunRequested = new AtomicBoolean(false);
 
     // Mobile number -> User
     private volatile Map<String, User> mobileIndex = new ConcurrentHashMap<>();
@@ -40,8 +45,8 @@ public class UserCacheService {
     private static final long PENDING_TTL_MS = 10 * 60 * 1000L;
 
     @Autowired
-    public UserCacheService(RcService rcService) {
-        this.rcService = rcService;
+    public UserCacheService(RcWindowedFetcher rcWindowedFetcher) {
+        this.rcWindowedFetcher = rcWindowedFetcher;
     }
 
     @PostConstruct
@@ -58,14 +63,30 @@ public class UserCacheService {
     }
 
     /**
-     * Refresh cache every 60 seconds.
-     * Configurable via application.properties: user.cache.refresh-interval-ms
+     * Refresh the cache on a schedule (user.cache.refresh-interval-ms, default 5 minutes).
+     * If a refresh is already running, this call does not start a second one; it asks the running one
+     * to go once more when it finishes, so a user created mid-refresh is still picked up.
      */
-    @Scheduled(fixedDelayString = "${user.cache.refresh-interval-ms:60000}", initialDelay = 10000)
+    @Scheduled(fixedDelayString = "${user.cache.refresh-interval-ms:300000}", initialDelay = 10000)
     public void refreshCache() {
+        if (!refreshing.compareAndSet(false, true)) {
+            rerunRequested.set(true);
+            return;
+        }
+        try {
+            do {
+                rerunRequested.set(false);
+                doRefresh();
+            } while (rerunRequested.get());
+        } finally {
+            refreshing.set(false);
+        }
+    }
+
+    private void doRefresh() {
         try {
             log.info("Refreshing user cache...");
-            List<User> users = rcService.getAllUsers();
+            List<User> users = rcWindowedFetcher.fetchAll("Users", User.class, User::getOsid);
 
             if (users == null || users.isEmpty()) {
                 log.warn("No users returned from registry, keeping existing cache");

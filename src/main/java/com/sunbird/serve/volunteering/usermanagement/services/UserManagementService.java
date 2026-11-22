@@ -209,10 +209,13 @@ public class UserManagementService {
 
     public ResponseEntity<List<User>> getAllUsers(Map<String, String> headers) {
         try {
-            log.info("Fetching all users");
-            List<User> allUsers = rcService.getUsers();
-            log.info("Successfully fetched {} users", allUsers.size());
-            return ResponseEntity.ok(allUsers);
+            log.info("Fetching all active users");
+            // From the cache: a direct RC search is capped (500 here, 2000 by RC) and would miss users
+            List<User> activeUsers = userCacheService.getAllUsers().stream()
+                    .filter(u -> "Active".equals(u.getStatus()))
+                    .collect(Collectors.toList());
+            log.info("Successfully fetched {} active users", activeUsers.size());
+            return ResponseEntity.ok(activeUsers);
         } catch (Exception e) {
             log.error("Error fetching all users: {}", e.getMessage(), e);
             return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR).build();

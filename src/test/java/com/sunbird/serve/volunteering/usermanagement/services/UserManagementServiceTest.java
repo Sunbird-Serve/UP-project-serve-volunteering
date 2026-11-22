@@ -145,16 +145,16 @@ class UserManagementServiceTest {
     void getAllUsers_ShouldReturnAllUsers() {
         // Given
         List<User> expectedUsers = Arrays.asList(createTestUser(), createTestUser());
-        when(rcService.getUsers()).thenReturn(expectedUsers);
+        when(userCacheService.getAllUsers()).thenReturn(Arrays.asList(createTestUser(), createInactiveUser(), createTestUser()));
 
         // When
         ResponseEntity<List<User>> response = userManagementService.getAllUsers(headers);
 
-        // Then
+        // Then: only Active users from the cache
         assertNotNull(response);
         assertEquals(HttpStatus.OK, response.getStatusCode());
         assertEquals(expectedUsers, response.getBody());
-        verify(rcService).getUsers();
+        verify(userCacheService).getAllUsers();
     }
 
     private User createTestUser() {
